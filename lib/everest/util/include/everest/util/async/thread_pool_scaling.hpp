@@ -108,6 +108,19 @@ template <std::size_t ThresholdMs = 10> struct LatencyScaling {
 // |              |                          | when a specific depth limit is hit.    |
 // +--------------+--------------------------+----------------------------------------+
 
+// --- Exception Handling Policies ---
+
+/**
+ * @brief Exception handling policy for task execution in the thread pool.
+ * @details Controls how the thread pool handles exceptions thrown by tasks:
+ *   - Suppress: Silently catch and discard exceptions (fire-and-forget semantics)
+ *   - Rethrow: Rethrow from worker context; uncaught thread exceptions terminate process
+ */
+enum class ExceptionPolicy {
+    Suppress, ///< Silently suppress exceptions, thread continues
+    Rethrow   ///< Rethrow exception from worker task context
+};
+
 /**
  * @brief A thread pool that dynamically scales its worker count based on a policy.
  * * @details This pool maintains a minimum number of threads and expands up to a maximum
@@ -127,15 +140,17 @@ public:
      * @param[in] max Maximum allowed worker threads.
      * @param[in] timeout Idle duration before a surplus worker retires. Defaults to 60s.
      * @param[in] queue_limit Maximum tasks allowed in the queue. Defaults to 0 (unbounded).
+     * @param[in] exception_policy Exception handling policy for task execution. Defaults to Suppress.
      */
     template <class Rep, class Period>
     thread_pool_scaling(std::size_t min, std::size_t max,
                         std::chrono::duration<Rep, Period> timeout = std::chrono::seconds(60),
-                        std::size_t queue_limit = 0) :
+                        std::size_t queue_limit = 0, ExceptionPolicy exception_policy = ExceptionPolicy::Suppress) :
         m_min_threads(min),
         m_max_threads(max),
         m_idle_timeout(std::chrono::duration_cast<std::chrono::milliseconds>(timeout)),
-        m_action_queue(queue_limit) {
+        m_action_queue(queue_limit),
+        m_exception_policy(exception_policy) {
 
         auto reg_h = m_reg.handle();
         for (std::size_t i = 0; i < m_min_threads; ++i) {
@@ -265,8 +280,12 @@ private:
                     try {
                         task_opt->func();
                     } catch (...) {
-                        // Suppress exception to prevent thread termination.
-                        // Fire-and-forget tasks are responsible for their own error handling.
+                        switch (m_exception_policy) {
+                        case ExceptionPolicy::Suppress:
+                            break;
+                        case ExceptionPolicy::Rethrow:
+                            throw;
+                        }
                     }
                     // Steal the zombie deque under the lock, then join outside it.
                     // Joining while holding the lock is safe in practice (the zombie has already
@@ -313,6 +332,7 @@ private:
     const std::size_t m_min_threads;                ///< Minimum persistent thread count.
     const std::size_t m_max_threads;                ///< Maximum allowed thread count.
     const std::chrono::milliseconds m_idle_timeout; ///< Surplus thread idle timeout.
+    const ExceptionPolicy m_exception_policy;       ///< Exception handling policy for tasks.
 
     thread_safe_bounded_queue<TrackedAction> m_action_queue; ///< Task queue.
     monitor<RegistryData> m_reg;                             ///< Worker registry.
