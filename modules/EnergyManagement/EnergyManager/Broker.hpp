@@ -57,7 +57,7 @@ public:
     };
 
     Broker(Market& market, BrokerContext& context, EnergyManagerConfig config);
-    virtual ~Broker(){};
+    virtual ~Broker() {};
 
     // Asks this broker to trade based on the given offer.
     // The broker will decide how much / if it wants to trade and
@@ -87,7 +87,10 @@ protected:
     bool buy_watt(const types::energy::ScheduleReqEntry& _offer, int index, float watt, bool allow_less, bool import);
 
     date::utc_clock::time_point to_timestamp(const types::energy::ScheduleReqEntry& entry);
+    std::vector<date::utc_clock::time_point> parse_timestamps(const ScheduleReq& offer);
     bool time_slot_active(const int i, const ScheduleReq& offer);
+    bool time_slot_active(const int i, const ScheduleReq& offer,
+                          const std::vector<date::utc_clock::time_point>& cached_timestamps);
 
     // reference to local market at the broker's node
     Market& local_market;

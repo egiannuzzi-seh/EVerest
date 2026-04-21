@@ -87,6 +87,39 @@ date::utc_clock::time_point Broker::to_timestamp(const types::energy::ScheduleRe
     return Everest::Date::from_rfc3339(entry.timestamp);
 }
 
+std::vector<date::utc_clock::time_point> Broker::parse_timestamps(const ScheduleReq& offer) {
+    std::vector<date::utc_clock::time_point> timestamps;
+    timestamps.clear();
+    timestamps.reserve(offer.size());
+
+    for (const auto& entry : offer) {
+        timestamps.push_back(to_timestamp(entry));
+    }
+    return timestamps;
+}
+
+bool Broker::time_slot_active(const int i, const ScheduleReq& offer,
+                              const std::vector<date::utc_clock::time_point>& cached_timestamps) {
+    const auto& now = globals.start_time;
+
+    int active_slot = 0;
+
+    if (now < cached_timestamps[0]) {
+        active_slot = 0;
+    } else if (now > cached_timestamps.back()) {
+        active_slot = cached_timestamps.size() - 1;
+    } else {
+        for (int n = 0; n < cached_timestamps.size() - 1; n++) {
+            if (now > cached_timestamps[n] && now < cached_timestamps[n + 1]) {
+                active_slot = n;
+                break;
+            }
+        }
+    }
+
+    return active_slot == i;
+}
+
 bool Broker::time_slot_active(const int i, const ScheduleReq& offer) {
     const auto& now = globals.start_time;
     const auto t_i = to_timestamp(offer[i]);

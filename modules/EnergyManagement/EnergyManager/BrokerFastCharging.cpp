@@ -14,9 +14,11 @@ void BrokerFastCharging::tradeImpl() {
     // cases we buy as much as possible (this is the fast charging implementation).
 
     // if we have not bought anything, we first need to buy the minimal limits for ac_amp if any.
-    for (int i = 0; i < globals.schedule_length; i++) {
 
-        bool time_slot_is_active = time_slot_active(i, offer->import_offer);
+    auto cached_timestamps = parse_timestamps(offer->import_offer);
+
+    for (int i = 0; i < globals.schedule_length; i++) {
+        bool time_slot_is_active = time_slot_active(i, offer->import_offer, cached_timestamps);
 
         // make this more readable
         auto& max_current_import = offer->import_offer[i].limits_to_root.ac_max_current_A;
