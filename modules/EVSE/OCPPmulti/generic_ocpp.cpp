@@ -466,6 +466,33 @@ GenericOcpp::EventInfo GenericOcpp::convert_error(const Everest::error::Error& e
     return event_data;
 }
 
+void GenericOcpp::dispatch_event_info(EventInfo event_data) {
+    const auto ocpp_evse_id = to_ocpp_evse_id(event_data.evse_id);
+    if (not ocpp_evse_id.has_value()) {
+        EVLOG_debug << "Ignoring error of EVerest evse id " << event_data.evse_id
+                    << " which is not served by this OCPP instance";
+        return;
+    }
+    event_data.evse_id = ocpp_evse_id.value();
+    mv_charge_point.on_event(event_data);
+}
+
+void GenericOcpp::report_inoperative(std::int32_t evse_id, const EventInfo& event) {
+    mv_charge_point.on_event(event);
+
+    if (evse_id <= 0) {
+        // libocpp has no EVSE 0; a fault without an EVSE cannot be attributed
+        EVLOG_warning << "Ignoring " << event.error->type << " without an EVSE (evse_id " << evse_id << ")";
+        return;
+    }
+    const auto connector_id = get_connector_id_from_error(event.error.value());
+    if (event.event_cleared) {
+        mv_charge_point.on_fault_cleared(evse_id, connector_id);
+    } else {
+        mv_charge_point.on_faulted(evse_id, connector_id);
+    }
+}
+
 void GenericOcpp::init_custom_error_mapping() {
     const auto configured = mv_config.getCustomErrorMappingPath();
     if (configured.empty()) {
@@ -522,17 +549,6 @@ void GenericOcpp::ready_custom_error_mapping(
     };
     report_findings(mv_custom_error_mapping_path, validate_device_model(*mv_custom_error_mapping, lookup,
                                                                         evse_connector_structure, /*strict=*/false));
-}
-
-void GenericOcpp::dispatch_event_info(EventInfo event_data) {
-    const auto ocpp_evse_id = to_ocpp_evse_id(event_data.evse_id);
-    if (not ocpp_evse_id.has_value()) {
-        EVLOG_debug << "Ignoring error of EVerest evse id " << event_data.evse_id
-                    << " which is not served by this OCPP instance";
-        return;
-    }
-    event_data.evse_id = ocpp_evse_id.value();
-    mv_charge_point.on_event(event_data);
 }
 
 void GenericOcpp::init() {
@@ -915,23 +931,13 @@ void GenericOcpp::visit_impl(std::int32_t evse_id, const EventInfo& event) {
     EVLOG_debug << "Processing queued error event for evse_id: " << evse_id << ": "
                 << (event.error ? event.error->type : std::string{"<no error>"})
                 << (event.event_cleared ? " (cleared)" : " (raised)");
-    dispatch_event_info(event);
-
-    if (event.error) {
-        // We do only report inoperative errors as faults
-        if (event.error->type == module::EVSE_MANAGER_INOPERATIVE_ERROR) {
-            if (evse_id <= 0) {
-                // libocpp has no EVSE 0; a fault queued without an EVSE cannot be attributed
-                EVLOG_warning << "Ignoring queued " << event.error->type << " without an EVSE (evse_id " << evse_id
-                              << ")";
-                return;
-            }
-            if (event.event_cleared) {
-                mv_charge_point.on_fault_cleared(evse_id, get_connector_id_from_error(event.error.value()));
-            } else {
-                mv_charge_point.on_faulted(evse_id, get_connector_id_from_error(event.error.value()));
-            }
-        }
+    // Only the fault handlers queue Inoperative errors (cb_error_handler/cb_error_cleared_handler skip
+    // them), so an Inoperative event carries the OCPP evse id and every other error the EVerest evse id
+    // of its mapping.
+    if (event.error and event.error->type == module::EVSE_MANAGER_INOPERATIVE_ERROR) {
+        report_inoperative(evse_id, event);
+    } else {
+        dispatch_event_info(event);
     }
 }
 
@@ -1234,7 +1240,7 @@ void GenericOcpp::cb_default_price(const types::session_cost::DefaultPrice& mess
 void GenericOcpp::cb_error_cleared_handler(const Everest::error::Error& error) {
     using namespace module;
 
-    // handled by specific evse_manager error handler
+    // handled by specific evse_manager error handler; visit_impl() relies on this to tell the id spaces apart
     if (error.type != EVSE_MANAGER_INOPERATIVE_ERROR) {
         auto event_data = convert_error(error);
         event_data.event_cleared = true;
@@ -1247,7 +1253,7 @@ void GenericOcpp::cb_error_cleared_handler(const Everest::error::Error& error) {
 void GenericOcpp::cb_error_handler(const Everest::error::Error& error) {
     using namespace module;
 
-    // handled by specific evse_manager error handler
+    // handled by specific evse_manager error handler; visit_impl() relies on this to tell the id spaces apart
     if (error.type != EVSE_MANAGER_INOPERATIVE_ERROR) {
         auto event_data = convert_error(error);
         event_data.event_cleared = false;
@@ -1276,6 +1282,8 @@ void GenericOcpp::cb_ev_info(std::int32_t evse_id, const types::evse_manager::EV
 // falls back to 0 without one; queueing or reporting the fault under EVSE 0 makes libocpp throw
 // EvseOutOfRangeException when the queue is replayed in ready() (the transient BSP
 // CommunicationFault at start-up made EvseManager Inoperative before OCPP had started).
+// \p evse_id is the position of the evse_manager requirement, which is the OCPP evse id, so the
+// event goes to the charge point through report_inoperative(), without dispatch_event_info().
 void GenericOcpp::cb_fault_cleared_handler(std::int32_t evse_id, const Everest::error::Error& error) {
     using namespace module;
 
@@ -1283,8 +1291,7 @@ void GenericOcpp::cb_fault_cleared_handler(std::int32_t evse_id, const Everest::
     event_data.evse_id = evse_id;
     event_data.event_cleared = true;
     if (!enqueue_if_not_started(evse_id, event_data)) {
-        dispatch_event_info(event_data);
-        mv_charge_point.on_fault_cleared(evse_id, get_connector_id_from_error(error));
+        report_inoperative(evse_id, event_data);
     }
 }
 
@@ -1295,8 +1302,7 @@ void GenericOcpp::cb_fault_handler(std::int32_t evse_id, const Everest::error::E
     event_data.evse_id = evse_id;
     event_data.event_cleared = false;
     if (!enqueue_if_not_started(evse_id, event_data)) {
-        dispatch_event_info(event_data);
-        mv_charge_point.on_faulted(evse_id, get_connector_id_from_error(error));
+        report_inoperative(evse_id, event_data);
     }
 }
 
@@ -1379,7 +1385,8 @@ ocpp::ReservationCheckStatus
 GenericOcpp::cb_is_reservation_for_token(std::int32_t ocpp_evse_id, const ocpp::CiString<255>& idToken,
                                          const std::optional<ocpp::CiString<255>>& groupIdToken) {
 
-    // for v1.6 the incoming id is the OCPP1.6 connector id, which maps 1:1 to the EVerest evse_id
+    // for v1.6 the incoming id is the OCPP1.6 connector id, then it gets translated to the EVerest evse id for the
+    // reservation module
     auto reservation_status = types::reservation::ReservationCheckStatus::NotReserved;
 
     if (!mv_requires.reservation.empty() && mv_requires.reservation.at(0) != nullptr) {
